@@ -2,6 +2,8 @@ import discord
 from discord import app_commands
 import os
 import asyncio
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
 intents.members = True
@@ -59,12 +61,21 @@ TEXTOS = {
             "`/limpiar` — Borra mensajes\n"
             "`/anuncio` — Envía un anuncio\n"
             "`/antilink` — Activa/desactiva anti-link\n"
+            "`/antiraid` — Activa/desactiva anti-raid\n"
             "`/panel-bienvenida` — Panel de bienvenida\n"
             "`/panel-verificacion` — Panel de verificación\n"
             "`/panel-ticket` — Panel de tickets\n"
             "`/bot-info` — Este panel"
         ),
         "info_footer": "Usa los botones de abajo para cambiar el idioma del bot.",
+        "antiraid_on": "🛡️ Anti-raid activado. Umbral: **{n}** ingresos en **{s}** segundos. Modo: **{modo}**",
+        "antiraid_off": "❌ Anti-raid desactivado.",
+        "antiraid_alerta_titulo": "🚨 Posible Raid Detectado",
+        "antiraid_alerta_desc": "Se detectaron **{n}** ingresos en los últimos **{s}** segundos.",
+        "antiraid_accion": "Acción tomada",
+        "antiraid_accion_val_kick": "Se expulsarán automáticamente las cuentas nuevas (menos de 7 días) que se unan mientras dure la alerta.",
+        "antiraid_accion_val_lock": "Se activó temporalmente el nivel de verificación alto del servidor.",
+        "antiraid_lift": "✅ Anti-raid: modo de emergencia desactivado, el servidor volvió a la normalidad.",
     },
     "en": {
         "ping_respuesta": "🏓 Pong! Latency: **{ms}ms**",
@@ -111,12 +122,21 @@ TEXTOS = {
             "`/limpiar` — Delete messages\n"
             "`/anuncio` — Send announcement\n"
             "`/antilink` — Enable/disable anti-link\n"
+            "`/antiraid` — Enable/disable anti-raid\n"
             "`/panel-bienvenida` — Welcome panel\n"
             "`/panel-verificacion` — Verification panel\n"
             "`/panel-ticket` — Ticket panel\n"
             "`/bot-info` — This panel"
         ),
         "info_footer": "Use the buttons below to change the bot language.",
+        "antiraid_on": "🛡️ Anti-raid enabled. Threshold: **{n}** joins in **{s}** seconds. Mode: **{modo}**",
+        "antiraid_off": "❌ Anti-raid disabled.",
+        "antiraid_alerta_titulo": "🚨 Possible Raid Detected",
+        "antiraid_alerta_desc": "**{n}** joins detected in the last **{s}** seconds.",
+        "antiraid_accion": "Action taken",
+        "antiraid_accion_val_kick": "New accounts (under 7 days old) that join while the alert is active will be automatically kicked.",
+        "antiraid_accion_val_lock": "The server's verification level was temporarily set to high.",
+        "antiraid_lift": "✅ Anti-raid: emergency mode disabled, the server is back to normal.",
     },
     "pt": {
         "ping_respuesta": "🏓 Pong! Latência: **{ms}ms**",
@@ -163,12 +183,21 @@ TEXTOS = {
             "`/limpiar` — Apagar mensagens\n"
             "`/anuncio` — Enviar anúncio\n"
             "`/antilink` — Ativar/desativar anti-link\n"
+            "`/antiraid` — Ativar/desativar anti-raid\n"
             "`/panel-bienvenida` — Painel de boas-vindas\n"
             "`/panel-verificacion` — Painel de verificação\n"
             "`/panel-ticket` — Painel de tickets\n"
             "`/bot-info` — Este painel"
         ),
         "info_footer": "Use os botões abaixo para mudar o idioma do bot.",
+        "antiraid_on": "🛡️ Anti-raid ativado. Limite: **{n}** entradas em **{s}** segundos. Modo: **{modo}**",
+        "antiraid_off": "❌ Anti-raid desativado.",
+        "antiraid_alerta_titulo": "🚨 Possível Raid Detectado",
+        "antiraid_alerta_desc": "**{n}** entradas detectadas nos últimos **{s}** segundos.",
+        "antiraid_accion": "Ação tomada",
+        "antiraid_accion_val_kick": "Contas novas (com menos de 7 dias) que entrarem durante o alerta serão expulsas automaticamente.",
+        "antiraid_accion_val_lock": "O nível de verificação alto do servidor foi ativado temporariamente.",
+        "antiraid_lift": "✅ Anti-raid: modo de emergência desativado, o servidor voltou ao normal.",
     }
 }
 
@@ -247,6 +276,86 @@ async def antilink(interaction: discord.Interaction, canal: discord.TextChannel,
     else:
         canales_antilink.discard(canal.id)
         await interaction.response.send_message(t(gid, "antilink_off", canal=canal.mention), ephemeral=True)
+
+
+# ── Anti Raid ──────────────────────────────────────────────
+antiraid_config = {}                      # guild_id -> {"activo", "umbral", "ventana", "modo", "canal_alertas"}
+antiraid_joins = defaultdict(list)        # guild_id -> [datetime, ...]
+antiraid_emergencia = set()               # guild_ids actualmente en modo emergencia
+
+
+async def _activar_emergencia_raid(guild: discord.Guild, raid_cfg: dict):
+    gid = guild.id
+    canal_alertas = client.get_channel(raid_cfg.get("canal_alertas"))
+    modo = raid_cfg["modo"]
+    accion_texto = "antiraid_accion_val_kick" if modo == "kick" else "antiraid_accion_val_lock"
+
+    if modo == "lock":
+        try:
+            await guild.edit(verification_level=discord.VerificationLevel.high)
+        except discord.Forbidden:
+            pass
+
+    if canal_alertas:
+        embed = discord.Embed(
+            title=t(gid, "antiraid_alerta_titulo"),
+            description=t(gid, "antiraid_alerta_desc", n=raid_cfg["umbral"], s=raid_cfg["ventana"]),
+            color=discord.Color.dark_red()
+        )
+        embed.add_field(name=t(gid, "antiraid_accion"), value=t(gid, accion_texto), inline=False)
+        await canal_alertas.send(embed=embed)
+
+    await asyncio.sleep(raid_cfg["ventana"] * 6)
+    antiraid_emergencia.discard(gid)
+
+    if modo == "lock":
+        try:
+            await guild.edit(verification_level=discord.VerificationLevel.medium)
+        except discord.Forbidden:
+            pass
+
+    if canal_alertas:
+        await canal_alertas.send(t(gid, "antiraid_lift"))
+
+
+@tree.command(name="antiraid", description="Activa o desactiva la protección anti-raid")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    activar="True para activar, False para desactivar",
+    umbral="Cantidad de ingresos para disparar la alerta (por defecto 5)",
+    ventana="Ventana de tiempo en segundos para contar ingresos (por defecto 10)",
+    modo="Acción a tomar durante el raid",
+    canal_alertas="Canal donde enviar las alertas (por defecto, el canal actual)"
+)
+@app_commands.choices(modo=[
+    app_commands.Choice(name="Expulsar cuentas nuevas", value="kick"),
+    app_commands.Choice(name="Bloquear con verificación alta", value="lock"),
+])
+async def antiraid(
+    interaction: discord.Interaction,
+    activar: bool,
+    umbral: int = 5,
+    ventana: int = 10,
+    modo: app_commands.Choice[str] = None,
+    canal_alertas: discord.TextChannel = None
+):
+    gid = interaction.guild.id
+    if activar:
+        modo_valor = modo.value if modo else "kick"
+        antiraid_config[gid] = {
+            "activo": True,
+            "umbral": umbral,
+            "ventana": ventana,
+            "modo": modo_valor,
+            "canal_alertas": (canal_alertas or interaction.channel).id
+        }
+        await interaction.response.send_message(
+            t(gid, "antiraid_on", n=umbral, s=ventana, modo=modo_valor), ephemeral=True
+        )
+    else:
+        if gid in antiraid_config:
+            antiraid_config[gid]["activo"] = False
+        await interaction.response.send_message(t(gid, "antiraid_off"), ephemeral=True)
 
 
 # ── Malas palabras ─────────────────────────────────────────
@@ -366,6 +475,32 @@ async def panel_bienvenida(
 
 @client.event
 async def on_member_join(member):
+    gid = member.guild.id
+
+    # ── Detección anti-raid ─────────────────────────────
+    raid_cfg = antiraid_config.get(gid)
+    if raid_cfg and raid_cfg.get("activo"):
+        ahora = datetime.utcnow()
+        ventana = raid_cfg["ventana"]
+
+        antiraid_joins[gid].append(ahora)
+        antiraid_joins[gid] = [
+            ts for ts in antiraid_joins[gid] if (ahora - ts).total_seconds() <= ventana
+        ]
+
+        if len(antiraid_joins[gid]) >= raid_cfg["umbral"] and gid not in antiraid_emergencia:
+            antiraid_emergencia.add(gid)
+            asyncio.create_task(_activar_emergencia_raid(member.guild, raid_cfg))
+
+        if gid in antiraid_emergencia and raid_cfg["modo"] == "kick":
+            edad_cuenta = ahora - member.created_at.replace(tzinfo=None)
+            if edad_cuenta < timedelta(days=7):
+                try:
+                    await member.kick(reason="Anti-raid: cuenta nueva durante raid detectado")
+                except discord.Forbidden:
+                    pass
+                return
+
     guild_config = config.get(member.guild.id)
     if guild_config:
         canal = client.get_channel(guild_config["bienvenida"])
