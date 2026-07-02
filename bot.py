@@ -62,6 +62,7 @@ TEXTOS = {
             "`/anuncio` — Envía un anuncio\n"
             "`/antilink` — Activa/desactiva anti-link\n"
             "`/antiraid` — Activa/desactiva anti-raid\n"
+            "`/antibot` — Activa/desactiva anti-bot\n"
             "`/panel-bienvenida` — Panel de bienvenida\n"
             "`/panel-verificacion` — Panel de verificación\n"
             "`/panel-ticket` — Panel de tickets\n"
@@ -76,6 +77,9 @@ TEXTOS = {
         "antiraid_accion_val_kick": "Se expulsarán automáticamente las cuentas nuevas (menos de 7 días) que se unan mientras dure la alerta.",
         "antiraid_accion_val_lock": "Se activó temporalmente el nivel de verificación alto del servidor.",
         "antiraid_lift": "✅ Anti-raid: modo de emergencia desactivado, el servidor volvió a la normalidad.",
+        "antibot_on": "🤖🚫 Anti-bot activado. Acción: **{accion}**",
+        "antibot_off": "❌ Anti-bot desactivado.",
+        "antibot_bloqueado": "🤖🚫 Se detectó e intentó ingresar el bot **{nombre}**, fue **{accion}** automáticamente.",
     },
     "en": {
         "ping_respuesta": "🏓 Pong! Latency: **{ms}ms**",
@@ -123,6 +127,7 @@ TEXTOS = {
             "`/anuncio` — Send announcement\n"
             "`/antilink` — Enable/disable anti-link\n"
             "`/antiraid` — Enable/disable anti-raid\n"
+            "`/antibot` — Enable/disable anti-bot\n"
             "`/panel-bienvenida` — Welcome panel\n"
             "`/panel-verificacion` — Verification panel\n"
             "`/panel-ticket` — Ticket panel\n"
@@ -137,6 +142,9 @@ TEXTOS = {
         "antiraid_accion_val_kick": "New accounts (under 7 days old) that join while the alert is active will be automatically kicked.",
         "antiraid_accion_val_lock": "The server's verification level was temporarily set to high.",
         "antiraid_lift": "✅ Anti-raid: emergency mode disabled, the server is back to normal.",
+        "antibot_on": "🤖🚫 Anti-bot enabled. Action: **{accion}**",
+        "antibot_off": "❌ Anti-bot disabled.",
+        "antibot_bloqueado": "🤖🚫 Bot **{nombre}** tried to join and was automatically **{accion}**.",
     },
     "pt": {
         "ping_respuesta": "🏓 Pong! Latência: **{ms}ms**",
@@ -184,6 +192,7 @@ TEXTOS = {
             "`/anuncio` — Enviar anúncio\n"
             "`/antilink` — Ativar/desativar anti-link\n"
             "`/antiraid` — Ativar/desativar anti-raid\n"
+            "`/antibot` — Ativar/desativar anti-bot\n"
             "`/panel-bienvenida` — Painel de boas-vindas\n"
             "`/panel-verificacion` — Painel de verificação\n"
             "`/panel-ticket` — Painel de tickets\n"
@@ -198,6 +207,9 @@ TEXTOS = {
         "antiraid_accion_val_kick": "Contas novas (com menos de 7 dias) que entrarem durante o alerta serão expulsas automaticamente.",
         "antiraid_accion_val_lock": "O nível de verificação alto do servidor foi ativado temporariamente.",
         "antiraid_lift": "✅ Anti-raid: modo de emergência desativado, o servidor voltou ao normal.",
+        "antibot_on": "🤖🚫 Anti-bot ativado. Ação: **{accion}**",
+        "antibot_off": "❌ Anti-bot desativado.",
+        "antibot_bloqueado": "🤖🚫 O bot **{nombre}** tentou entrar e foi **{accion}** automaticamente.",
     }
 }
 
@@ -358,6 +370,35 @@ async def antiraid(
         await interaction.response.send_message(t(gid, "antiraid_off"), ephemeral=True)
 
 
+# ── Anti Bot ───────────────────────────────────────────────
+antibot_config = {}  # guild_id -> {"activo": bool, "accion": "kick"/"ban"}
+
+@tree.command(name="antibot", description="Activa o desactiva el bloqueo automático de bots que intenten unirse")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    activar="True para activar, False para desactivar",
+    accion="Qué hacer cuando un bot intente unirse"
+)
+@app_commands.choices(accion=[
+    app_commands.Choice(name="Expulsar (kick)", value="kick"),
+    app_commands.Choice(name="Banear (ban)", value="ban"),
+])
+async def antibot(
+    interaction: discord.Interaction,
+    activar: bool,
+    accion: app_commands.Choice[str] = None
+):
+    gid = interaction.guild.id
+    if activar:
+        accion_valor = accion.value if accion else "kick"
+        antibot_config[gid] = {"activo": True, "accion": accion_valor}
+        await interaction.response.send_message(t(gid, "antibot_on", accion=accion_valor), ephemeral=True)
+    else:
+        if gid in antibot_config:
+            antibot_config[gid]["activo"] = False
+        await interaction.response.send_message(t(gid, "antibot_off"), ephemeral=True)
+
+
 # ── Malas palabras ─────────────────────────────────────────
 MALAS_PALABRAS = ["mierda", "puta", "idiota", "imbecil", "pendejo", "cabron", "puto"]
 DURACION_AISLAMIENTO = 8
@@ -476,6 +517,25 @@ async def panel_bienvenida(
 @client.event
 async def on_member_join(member):
     gid = member.guild.id
+
+    # ── Anti-bot ─────────────────────────────────────────
+    antibot_cfg = antibot_config.get(gid)
+    if antibot_cfg and antibot_cfg.get("activo") and member.bot:
+        accion = antibot_cfg["accion"]
+        try:
+            if accion == "ban":
+                await member.ban(reason="Anti-bot: ingreso de bot no autorizado")
+            else:
+                await member.kick(reason="Anti-bot: ingreso de bot no autorizado")
+        except discord.Forbidden:
+            pass
+
+        canal_advertencia = discord.utils.get(member.guild.text_channels, name="advertencia")
+        if canal_advertencia:
+            await canal_advertencia.send(
+                t(gid, "antibot_bloqueado", nombre=member.name, accion=accion)
+            )
+        return
 
     # ── Detección anti-raid ─────────────────────────────
     raid_cfg = antiraid_config.get(gid)
